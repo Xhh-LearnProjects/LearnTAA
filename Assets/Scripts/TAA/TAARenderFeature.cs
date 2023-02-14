@@ -11,6 +11,14 @@ public class TAARenderFeature : ScriptableRendererFeature
     [System.Serializable]
     public class Settings
     {
+        public enum TAAQuality
+        {
+            Low,
+            Medium,
+            High
+        }
+
+        public TAAQuality Quality;
         public bool PreviewInSceneView;
         public bool UseMotionVector;
 
@@ -138,8 +146,9 @@ public class TAARenderFeature : ScriptableRendererFeature
         float contrastForMaxAntiFlicker = 0.7f - Mathf.Lerp(0.0f, 0.3f, Mathf.SmoothStep(0.5f, 1.0f, antiFlicker));
         m_Material.SetVector(ShaderConstants.Params1, new Vector4(settings.SharpenStrength, antiFlickerIntensity, contrastForMaxAntiFlicker, settings.sharpenHistoryStrength));
         m_Material.SetVector(ShaderConstants.Params2, new Vector4(settings.SharpenBlend, settings.StationaryBlending, settings.MotionBlending, 0));
-
     }
+
+
 
     public override void AddRenderPasses(ScriptableRenderer renderer, ref RenderingData renderingData)
     {
@@ -164,23 +173,46 @@ public class TAARenderFeature : ScriptableRendererFeature
         renderer.EnqueuePass(m_TAACameraPass);
 
         SetupMaterials(ref renderingData);
+
+        //移动到PASS下
+        // RenderTextureDescriptor desc = renderingData.cameraData.cameraTargetDescriptor;
+        // desc.msaaSamples = 1;
+        // desc.depthBufferBits = 0;
+        // var source = renderingData.cameraData.renderer.cameraColorTargetHandle;
+        // CheckHistoryRT(0, hash, cmd, source, desc);
+
+
         m_TAAPass.Setup(settings, m_Material);
         renderer.EnqueuePass(m_TAAPass);
     }
+}
 
+class MultiCameraInfo
+{
+    const int k_NumHistoryTextures = 2;
+    RenderTexture[] m_HistoryPingPongRT;
+    public Matrix4x4 m_PreviousViewProjectionMatrix = Matrix4x4.zero;
 
-
-    class MultiCameraInfo
+    public MultiCameraInfo()
     {
-        public Matrix4x4 m_PreviousViewProjectionMatrix = Matrix4x4.zero;
+        m_HistoryPingPongRT = new RenderTexture[k_NumHistoryTextures];
+    }
 
+    public Matrix4x4 SetPreviousVPMatrix(Matrix4x4 curVPMatrix)
+    {
+        Matrix4x4 preVPMatrix = m_PreviousViewProjectionMatrix == Matrix4x4.zero ? curVPMatrix : m_PreviousViewProjectionMatrix;
+        m_PreviousViewProjectionMatrix = curVPMatrix;
+        return preVPMatrix;
+    }
 
-        public Matrix4x4 SetPreviousVPMatrix(Matrix4x4 curVPMatrix)
-        {
-            Matrix4x4 preVPMatrix = m_PreviousViewProjectionMatrix == Matrix4x4.zero ? curVPMatrix : m_PreviousViewProjectionMatrix;
-            m_PreviousViewProjectionMatrix = curVPMatrix;
-            return preVPMatrix;
-        }
+    public RenderTexture GetHistoryRT(int id)
+    {
+        return m_HistoryPingPongRT[id];
+    }
+
+    public void SetHistoryRT(int id, RenderTexture rt)
+    {
+        m_HistoryPingPongRT[id] = rt;
     }
 }
 
