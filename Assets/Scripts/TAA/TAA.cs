@@ -9,7 +9,7 @@ public class TAAPass : ScriptableRenderPass
     ProfilingSampler m_ProfilingSampler;
     private Material m_Material;
 
-    Dictionary<int, MultiCameraInfo> m_MultiCameraInfo = new Dictionary<int, MultiCameraInfo>();
+    Dictionary<int, MultiCameraInfo> m_MultiCameraInfo;// = new Dictionary<int, MultiCameraInfo>();
 
     public TAAPass()
     {
@@ -42,9 +42,10 @@ public class TAAPass : ScriptableRenderPass
     }
 
 
-    public void Setup(TAARenderFeature.Settings settings, Material material)
+    public void Setup(TAARenderFeature.Settings settings, Material material, Dictionary<int, MultiCameraInfo> multiCameraInfoMap)
     {
         m_Material = material;
+        m_MultiCameraInfo = multiCameraInfoMap;
     }
 
     public override void Execute(ScriptableRenderContext context, ref RenderingData renderingData)
@@ -63,6 +64,14 @@ public class TAAPass : ScriptableRenderPass
             Camera camera = renderingData.cameraData.camera;
 
             //准备历史RT
+            int hash = camera.GetHashCode();
+            var source = renderingData.cameraData.renderer.cameraColorTargetHandle;
+            CheckHistoryRT(0, hash, cmd, source, desc);
+            CheckHistoryRT(1, hash, cmd, source, desc);
+
+            RenderTexture rt1 = null, rt2 = null;
+            m_MultiCameraInfo[hash].GetHistoryPingPongRT(ref rt1, ref rt2);
+            cmd.SetGlobalTexture("_HistoryTexture", rt1);
 
             // Blit(cmd, renderingData.cameraData.renderer.cameraColorTargetHandle, m_Target, m_Material);
             Blit(cmd, ref renderingData, m_Material);

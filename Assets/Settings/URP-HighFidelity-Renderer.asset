@@ -106,3 +106,13 @@ MonoBehaviour:
   m_Name: TAARenderFeature
   m_EditorClassIdentifier: 
   m_Active: 1
+  settings:
+    Quality: 0
+    PreviewInSceneView: 1
+    UseMotionVector: 0
+    StationaryBlending: 0.95
+    MotionBlending: 0.7
+    AntiFlicker: 0.5
+    SharpenStrength: 0.15
+    sharpenHistoryStrength: 0.35
+    SharpenBlend: 0.2

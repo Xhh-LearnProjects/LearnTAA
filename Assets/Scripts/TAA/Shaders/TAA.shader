@@ -30,9 +30,10 @@ Shader "Hidden/PostProcessing/TAA"
         #define SHARPEN_FILTER          0
     #endif
 
-    //-------------
+    // ------------------------------------------------------------------------------------
+    #define CLAMP_MAX       65472.0 // HALF_MAX minus one (2 - 2^-9) * 2^15
 
-    TEXTURE2D(_HistoryTexture);
+    TEXTURE2D(_HistoryTexture); float4 _HistoryTexture_TexelSize;
 
     float4x4 _PrevViewProjectionMatrix;
     float2 _Jitter;
@@ -81,10 +82,149 @@ Shader "Hidden/PostProcessing/TAA"
         Max3(a.z, b.z, c.z));
     }
 
+    float3 ConvertToWorkingSpace(float3 color)
+    {
+        #if YCOCG
+            return RGBToYCoCg(color);
+        #else
+            return color;
+        #endif
+    }
+
+    float3 ConvertToOutputSpace(float3 color)
+    {
+        #if YCOCG
+            return YCoCgToRGB(color);
+        #else
+            return color;
+        #endif
+    }
+
+    float GetLuma(float3 color)
+    {
+        #if YCOCG
+            // We work in YCoCg hence the luminance is in the first channel.
+            return color.x;
+        #else
+            return Luminance(color);
+        #endif
+    }
+
+    float PerceptualWeight(float3 c)
+    {
+        #if _USETONEMAPPING
+            return rcp(GetLuma(c) + 1.0);
+        #else
+            return 1;
+        #endif
+    }
+
+    float PerceptualInvWeight(float3 c)
+    {
+        #if _USETONEMAPPING
+            return rcp(1.0 - GetLuma(c));
+        #else
+            return 1;
+        #endif
+    }
+
     half4 GetSourceTexture(float2 uv)
     {
         return SAMPLE_TEXTURE2D_X_LOD(_BlitTexture, sampler_LinearClamp, uv, 0);
     }
+
+    // 没有MotionVector 只处理摄像机运动的偏移
+    // 得到当前片元在上一帧画面中的位置
+    float2 GetReprojection(float depth, float2 uv)
+    {
+        //https://zhuanlan.zhihu.com/p/138866533
+        #if UNITY_REVERSED_Z
+            depth = 1.0 - depth;
+        #endif
+
+        depth = 2.0 * depth - 1.0;
+        // 深度还原世界坐标 TODO 这里unity_CameraInvProjection需要传递
+        float3 viewPos = ComputeViewSpacePosition(uv, depth, unity_CameraInvProjection);
+        float4 worldPos = float4(mul(unity_CameraToWorld, float4(viewPos, 1.0)).xyz, 1.0);
+
+        // 利用上一帧VP矩阵 找到当前坐标在上一帧的uv
+        float4 prevClipPos = mul(_PrevViewProjectionMatrix, worldPos);
+        float2 prevPosCS = prevClipPos.xy / prevClipPos.w;
+        return prevPosCS * 0.5 + 0.5;
+    }
+
+    // From Filmic SMAA presentation[Jimenez 2016]
+    // A bit more verbose that it needs to be, but makes it a bit better at latency hiding
+    float3 HistoryBicubic5Tap(float2 UV, float sharpening)
+    {
+        float2 samplePos = UV * _HistoryTexture_TexelSize.zw;
+        float2 tc1 = floor(samplePos - 0.5) + 0.5;
+        float2 f = samplePos - tc1;
+        float2 f2 = f * f;
+        float2 f3 = f * f2;
+
+        const float c = sharpening;
+
+        float2 w0 = -c * f3 + 2.0 * c * f2 - c * f;
+        float2 w1 = (2.0 - c) * f3 - (3.0 - c) * f2 + 1.0;
+        float2 w2 = - (2.0 - c) * f3 + (3.0 - 2.0 * c) * f2 + c * f;
+        float2 w3 = c * f3 - c * f2;
+
+        float2 w12 = w1 + w2;
+        float2 tc0 = _HistoryTexture_TexelSize.xy * (tc1 - 1.0);
+        float2 tc3 = _HistoryTexture_TexelSize.xy * (tc1 + 2.0);
+        float2 tc12 = _HistoryTexture_TexelSize.xy * (tc1 + w2 / w12);
+
+        float3 s0 = SAMPLE_TEXTURE2D(_HistoryTexture, sampler_LinearClamp, float2(tc12.x, tc0.y)).rgb;
+        float3 s1 = SAMPLE_TEXTURE2D(_HistoryTexture, sampler_LinearClamp, float2(tc0.x, tc12.y)).rgb;
+        float3 s2 = SAMPLE_TEXTURE2D(_HistoryTexture, sampler_LinearClamp, float2(tc12.x, tc12.y)).rgb;
+        float3 s3 = SAMPLE_TEXTURE2D(_HistoryTexture, sampler_LinearClamp, float2(tc3.x, tc0.y)).rgb;
+        float3 s4 = SAMPLE_TEXTURE2D(_HistoryTexture, sampler_LinearClamp, float2(tc12.x, tc3.y)).rgb;
+
+        float cw0 = (w12.x * w0.y);
+        float cw1 = (w0.x * w12.y);
+        float cw2 = (w12.x * w12.y);
+        float cw3 = (w3.x * w12.y);
+        float cw4 = (w12.x * w3.y);
+
+        // ANTI_RINGING
+        float3 min = Min3Float3(s0, s1, s2);
+        min = Min3Float3(min, s3, s4);
+
+        float3 max = Max3Float3(s0, s1, s2);
+        max = Max3Float3(max, s3, s4);
+
+        //
+        s0 *= cw0;
+        s1 *= cw1;
+        s2 *= cw2;
+        s3 *= cw3;
+        s4 *= cw4;
+
+        float3 historyFiltered = s0 + s1 + s2 + s3 + s4;
+        float weightSum = cw0 + cw1 + cw2 + cw3 + cw4;
+
+        float3 filteredVal = historyFiltered * rcp(weightSum);
+
+        // ANTI_RINGING
+        // This sortof neighbourhood clamping seems to work to avoid the appearance of overly dark outlines in case
+        // sharpening of history is too strong.
+        return clamp(filteredVal, min, max);
+    }
+
+    float3 GetFilteredHistory(float2 uv)
+    {
+        #if _USEBICUBIC5TAP
+            float3 history = HistoryBicubic5Tap(uv, _SharpenHistoryStrength);
+        #else
+            // Bilinear凑活下 没必要Bicubic
+            float3 history = SAMPLE_TEXTURE2D(_HistoryTexture, sampler_LinearClamp, uv).rgb;
+        #endif
+
+        history = clamp(history, 0, CLAMP_MAX);
+        return ConvertToWorkingSpace(history);
+    }
+
 
     //收集周边信息
     void GatherNeighbourhood(float2 uv, half3 centralColor, out NeighbourhoodSamples samples)
@@ -124,7 +264,41 @@ Shader "Hidden/PostProcessing/TAA"
     // msalvi_temporal_supersampling 2016
     void VarianceNeighbourhood(inout NeighbourhoodSamples samples, float historyLuma, float colorLuma, float2 antiFlickerParams, float motionVectorLength)
     {
+        float3 moment1 = 0;
+        float3 moment2 = 0;
 
+        UNITY_UNROLL
+        for (int i = 0; i < NEIGHBOUR_COUNT; ++i)
+        {
+            moment1 += samples.neighbours[i];
+            moment2 += samples.neighbours[i] * samples.neighbours[i];
+        }
+        samples.avgNeighbour = moment1 * rcp(NEIGHBOUR_COUNT);
+
+        moment1 += samples.central;
+        moment2 += samples.central * samples.central;
+
+        const int sampleCount = NEIGHBOUR_COUNT + 1;
+        moment1 *= rcp(sampleCount);
+        moment2 *= rcp(sampleCount);
+
+        float3 stdDev = sqrt(abs(moment2 - moment1 * moment1));
+
+        float stDevMultiplier = 1.5;
+        // The reasoning behind the anti flicker is that if we have high spatial contrast (high standard deviation)
+        // and high temporal contrast, we let the history to be closer to be unclipped. To achieve, the min/max bounds
+        // are extended artificially more.
+        // float temporalContrast = saturate(abs(colorLuma - historyLuma) / Max3(0.2, colorLuma, historyLuma));
+
+        // const float screenDiag = length(_SourceTex_TexelSize.zw);
+        // const float maxFactorScale = 2.25f; // when stationary
+        // const float minFactorScale = 0.8f; // when moving more than slightly
+        // float localizedAntiFlicker = lerp(antiFlickerParams.x * minFactorScale, antiFlickerParams.x * maxFactorScale, saturate(1.0f - 2.0f * (motionVectorLen * screenDiag)));
+        
+        // stDevMultiplier += lerp(0.0, localizedAntiFlicker, smoothstep(0.05, antiFlickerParams.y, temporalContrast));
+        // TODO 抗闪烁会导致半透物体问题
+        samples.minNeighbour = moment1 - stdDev * stDevMultiplier;
+        samples.maxNeighbour = moment1 + stdDev * stDevMultiplier;
     }
 
     void MinMaxNeighbourhood(inout NeighbourhoodSamples samples)
@@ -177,6 +351,9 @@ Shader "Hidden/PostProcessing/TAA"
     {
         #if HISTORY_CLIP_AABB
             return DirectClipToAABB(history, minimum, maximum);
+            // #elif HISTORY_CLIP_BLEDN
+            //     float historyBlend = DistToAABB(filteredColor, history, minimum, maximum);
+            //     return lerp(history, filteredColor, historyBlend);
         #else
             return clamp(history, minimum, maximum);
         #endif
@@ -218,15 +395,15 @@ Shader "Hidden/PostProcessing/TAA"
         // --------------- Get resampled history ---------------
         float depth = SampleSceneDepth(input.uv.xy);
 
-        // float3 history = GetFilteredHistory(prevUV);
-        // history *= PerceptualWeight(history);
+        float2 prevUV = GetReprojection(depth, input.uv.zw);
+        float2 motionVector = input.uv.xy - prevUV;
 
-        float2 motionVector = 0;
-        float3 history = 0;
+        float3 history = GetFilteredHistory(prevUV);
+        history *= PerceptualWeight(history);
+        // return float4(history, 1);
 
         // --------------- Gather neigbourhood data ---------------
         float2 uv = input.uv.xy - _Jitter;
-        // return half4(input.uv.zw, 0, 1);
 
         float3 color = GetSourceTexture(uv).rgb;
 
@@ -237,11 +414,13 @@ Shader "Hidden/PostProcessing/TAA"
         float3 filteredColor = FilterCentralColor(samples);
 
         //TODO 处理屏幕边缘
-        
+        bool offScreen = any(abs(prevUV * 2 - 1) >= 1.0f);
+        if (offScreen)
+            history = filteredColor;
 
         // --------------- Get neighbourhood information and clamp history ---------------
-        float colorLuma = Luminance(filteredColor);
-        float historyLuma = Luminance(history);
+        float colorLuma = GetLuma(filteredColor);
+        float historyLuma = GetLuma(history);
 
         float motionVectorLength = length(motionVector);
         GetNeighbourhoodCorners(samples, historyLuma, colorLuma, float2(_AntiFlickerIntensity, _ContrastForMaxAntiFlicker), motionVectorLength);
@@ -250,7 +429,21 @@ Shader "Hidden/PostProcessing/TAA"
         #if SHARPEN_FILTER
         #endif
 
-        return GetSourceTexture(uv);
+        // --------------- Compute blend factor for history ---------------
+        // TODO
+        // float blendFactor = GetBlendFactor(motionVectorLength, colorLuma, historyLuma, GetLuma(samples.minNeighbour), GetLuma(samples.maxNeighbour));
+        // blendFactor = max(blendFactor, 0.03);
+        // 还是先用老版本混合系数
+        float blendFactor = 1 - clamp(lerp(_StationaryBlend, _MotionBlend, motionVectorLength * 6000), _MotionBlend, _StationaryBlend);
+
+        // --------------- Blend to final value and output ---------------
+        float3 finalColor = lerp(history, filteredColor, blendFactor);
+
+        finalColor *= PerceptualInvWeight(finalColor);
+        finalColor = ConvertToOutputSpace(finalColor);
+        finalColor = clamp(finalColor, 0, CLAMP_MAX);
+
+        return float4(finalColor, blendFactor);
     }
     
 
