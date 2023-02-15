@@ -20,7 +20,10 @@ public class TAARenderFeature : ScriptableRendererFeature
 
         public TAAQuality Quality;
         public bool PreviewInSceneView;
+        [Tooltip("使用MotionVector (SceneView没有)")]
         public bool UseMotionVector;
+        [Tooltip("ToneMapping减少闪烁,但是会降低一些高亮的溢出")]
+        public bool UseToneMapping = false;
 
 
         [Tooltip("历史帧中静止像素混合比例")]
@@ -34,6 +37,7 @@ public class TAARenderFeature : ScriptableRendererFeature
 
         [Tooltip("降低闪烁")]
         [Range(0f, 1f)]
+        // [HideInInspector]
         public float AntiFlicker = 0.5f;
 
         [Space(6)]
@@ -43,11 +47,17 @@ public class TAARenderFeature : ScriptableRendererFeature
         public float SharpenStrength = 0.15f;
 
         [Range(0f, 1f)]
+        [HideInInspector]
         public float sharpenHistoryStrength = 0.35f;
 
         [Tooltip("锐化混合只在HighQuality生效")]
         [Range(0f, 1f)]
+        [HideInInspector]
         public float SharpenBlend = 0.2f;
+
+        [Tooltip("对历史帧做锐化只在HighQuality生效")]
+        [HideInInspector]
+        public bool UseBicubic = false;
     }
 
     public Settings settings;
@@ -55,10 +65,8 @@ public class TAARenderFeature : ScriptableRendererFeature
     private TAAPass m_TAAPass;
     private TemporalAntialiasingCamera m_TAACameraPass;
 
-    Material m_Material;
     Matrix4x4 m_PreviousViewProjectionMatrix;
     Vector2 m_Jitter;
-
 
     //为了能在sceneview也能生效 使用多个MultiCameraInfo
     Dictionary<int, MultiCameraInfo> m_MultiCameraInfo = new Dictionary<int, MultiCameraInfo>();
@@ -72,11 +80,6 @@ public class TAARenderFeature : ScriptableRendererFeature
         //根据渲染路径决定顺序
         // m_TAACameraPass.renderPassEvent = RenderPassEvent.BeforeRenderingOpaques;//Forward
         m_TAACameraPass.renderPassEvent = RenderPassEvent.BeforeRenderingGbuffer;//Deferred
-
-        if (m_Material == null)
-        {
-            m_Material = CoreUtils.CreateEngineMaterial(Shader.Find("Hidden/PostProcessing/TAA"));
-        }
     }
 
     public int sampleIndex { get; private set; }
@@ -119,47 +122,6 @@ public class TAARenderFeature : ScriptableRendererFeature
         return projMatrix;
     }
 
-    static class ShaderConstants
-    {
-        internal static readonly int PrevViewProjectionMatrix = Shader.PropertyToID("_PrevViewProjectionMatrix");
-        internal static readonly int Jitter = Shader.PropertyToID("_Jitter");
-        internal static readonly int Params1 = Shader.PropertyToID("_Params1");
-        internal static readonly int Params2 = Shader.PropertyToID("_Params2");
-
-        public static string GetQualityKeyword(Settings.TAAQuality quality)
-        {
-            switch (quality)
-            {
-                case Settings.TAAQuality.Low:
-                    return "LOW_QUALITY";
-                case Settings.TAAQuality.High:
-                    return "HIGH_QUALITY";
-                case Settings.TAAQuality.Medium:
-                default:
-                    return "MEDIUM_QUALITY";
-            }
-        }
-    }
-
-    void SetupMaterials(ref RenderingData renderingData)
-    {
-        if (m_Material == null)
-            return;
-
-        var cameraData = renderingData.cameraData;
-
-        var width = cameraData.cameraTargetDescriptor.width;
-        var height = cameraData.cameraTargetDescriptor.height;
-
-        m_Material.SetMatrix(ShaderConstants.PrevViewProjectionMatrix, m_PreviousViewProjectionMatrix);
-        m_Material.SetVector(ShaderConstants.Jitter, m_Jitter);
-
-        float antiFlicker = 0;
-        float antiFlickerIntensity = Mathf.Lerp(0.0f, 3.5f, antiFlicker);
-        float contrastForMaxAntiFlicker = 0.7f - Mathf.Lerp(0.0f, 0.3f, Mathf.SmoothStep(0.5f, 1.0f, antiFlicker));
-        m_Material.SetVector(ShaderConstants.Params1, new Vector4(settings.SharpenStrength, antiFlickerIntensity, contrastForMaxAntiFlicker, settings.sharpenHistoryStrength));
-        m_Material.SetVector(ShaderConstants.Params2, new Vector4(settings.SharpenBlend, settings.StationaryBlending, settings.MotionBlending, 0));
-    }
 
     public override void AddRenderPasses(ScriptableRenderer renderer, ref RenderingData renderingData)
     {
@@ -183,17 +145,7 @@ public class TAARenderFeature : ScriptableRendererFeature
         m_TAACameraPass.Setup(jitterredProjectMatrix, taaFrameIndex);
         renderer.EnqueuePass(m_TAACameraPass);
 
-        SetupMaterials(ref renderingData);
-
-        //移动到PASS下
-        // RenderTextureDescriptor desc = renderingData.cameraData.cameraTargetDescriptor;
-        // desc.msaaSamples = 1;
-        // desc.depthBufferBits = 0;
-        // var source = renderingData.cameraData.renderer.cameraColorTargetHandle;
-        // CheckHistoryRT(0, hash, cmd, source, desc);
-
-
-        m_TAAPass.Setup(settings, m_Material, m_MultiCameraInfo);
+        m_TAAPass.Setup(settings, m_MultiCameraInfo, m_Jitter, m_PreviousViewProjectionMatrix);
         renderer.EnqueuePass(m_TAAPass);
     }
 

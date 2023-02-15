@@ -32,8 +32,10 @@ Shader "Hidden/PostProcessing/TAA"
 
     // ------------------------------------------------------------------------------------
     #define CLAMP_MAX       65472.0 // HALF_MAX minus one (2 - 2^-9) * 2^15
-
+    float4 _BlitTexture_TexelSize;
     TEXTURE2D(_HistoryTexture); float4 _HistoryTexture_TexelSize;
+
+    float4 _CameraDepthTexture_TexelSize;
 
     float4x4 _PrevViewProjectionMatrix;
     float2 _Jitter;
@@ -47,7 +49,11 @@ Shader "Hidden/PostProcessing/TAA"
     #define _StationaryBlend                _Params2.y
     #define _MotionBlend                    _Params2.z
 
-
+    #if defined(UNITY_REVERSED_Z)
+        #define COMPARE_DEPTH(a, b) step(b, a)
+    #else
+        #define COMPARE_DEPTH(a, b) step(a, b)
+    #endif
 
     #define SMALL_NEIGHBOURHOOD_SIZE 4
     #define WIDTH_NEIGHBOURHOOD_SIZE 8
@@ -128,10 +134,43 @@ Shader "Hidden/PostProcessing/TAA"
         #endif
     }
 
-    half4 GetSourceTexture(float2 uv)
+    float3 GetSourceTexture(float2 uv)
     {
-        return SAMPLE_TEXTURE2D_X_LOD(_BlitTexture, sampler_LinearClamp, uv, 0);
+        float3 color = SAMPLE_TEXTURE2D_X_LOD(_BlitTexture, sampler_LinearClamp, uv, 0).rgb;
+        color = clamp(color, 0, CLAMP_MAX);
+        return ConvertToWorkingSpace(color);
     }
+
+    // 找到邻近深度最小的点的uv作为MotionVector的uv
+    // Front most neighbourhood velocity ([Karis 2014])
+    float2 GetClosestFragment(float depth, float2 uv)
+    {
+        float2 k = _CameraDepthTexture_TexelSize.xy;
+
+        // 只用了斜角 tl tr bl br 节省性能
+        float3 tl = float3(-1, -1, SampleSceneDepth(uv - k));
+        float3 tr = float3(1, -1, SampleSceneDepth(uv + float2(k.x, -k.y)));
+        float3 mc = float3(0, 0, depth);
+        float3 bl = float3(-1, 1, SampleSceneDepth(uv + float2(-k.x, k.y)));
+        float3 br = float3(1, 1, SampleSceneDepth(uv + k));
+        // float3 tc = float3( 0, -1, SampleSceneDepth(uv + float2( 0,   -k.y)));
+        // float3 ml = float3(-1,  0, SampleSceneDepth(uv + float2(-k.x,  0)));
+        // float3 mr = float3( 1,  0, SampleSceneDepth(uv + float2( k.x,  0)));
+        // float3 bc = float3( 0,  1, SampleSceneDepth(uv + float2( 0,    k.y)));
+
+        float3 rmin = mc;
+        rmin = lerp(rmin, tl, COMPARE_DEPTH(tl.z, rmin.z));
+        rmin = lerp(rmin, tr, COMPARE_DEPTH(tr.z, rmin.z));
+        rmin = lerp(rmin, bl, COMPARE_DEPTH(bl.z, rmin.z));
+        rmin = lerp(rmin, br, COMPARE_DEPTH(br.z, rmin.z));
+        // rmin = lerp(rmin, tc, COMPARE_DEPTH(tc.z, rmin.z));
+        // rmin = lerp(rmin, ml, COMPARE_DEPTH(ml.z, rmin.z));
+        // rmin = lerp(rmin, mr, COMPARE_DEPTH(mr.z, rmin.z));
+        // rmin = lerp(rmin, bc, COMPARE_DEPTH(bc.z, rmin.z));
+
+        return uv + rmin.xy * k;
+    }
+
 
     // 没有MotionVector 只处理摄像机运动的偏移
     // 得到当前片元在上一帧画面中的位置
@@ -225,11 +264,25 @@ Shader "Hidden/PostProcessing/TAA"
         return ConvertToWorkingSpace(history);
     }
 
+    void ConvertNeighboursToPerceptualSpace(inout NeighbourhoodSamples samples)
+    {
+        samples.neighbours[0] *= PerceptualWeight(samples.neighbours[0]);
+        samples.neighbours[1] *= PerceptualWeight(samples.neighbours[1]);
+        samples.neighbours[2] *= PerceptualWeight(samples.neighbours[2]);
+        samples.neighbours[3] *= PerceptualWeight(samples.neighbours[3]);
+        #if WIDE_NEIGHBOURHOOD
+            samples.neighbours[4] *= PerceptualWeight(samples.neighbours[4]);
+            samples.neighbours[5] *= PerceptualWeight(samples.neighbours[5]);
+            samples.neighbours[6] *= PerceptualWeight(samples.neighbours[6]);
+            samples.neighbours[7] *= PerceptualWeight(samples.neighbours[7]);
+        #endif
+        samples.central *= PerceptualWeight(samples.central);
+    }
 
     //收集周边信息
     void GatherNeighbourhood(float2 uv, half3 centralColor, out NeighbourhoodSamples samples)
     {
-        float2 k = _BlitTextureSize.xy;
+        float2 k = _BlitTexture_TexelSize.xy;
         samples = (NeighbourhoodSamples)0;
         samples.central = centralColor;
 
@@ -252,6 +305,10 @@ Shader "Hidden/PostProcessing/TAA"
             samples.neighbours[1] = GetSourceTexture(uv + float2(1, 0) * k);
             samples.neighbours[2] = GetSourceTexture(uv + float2(0, -1) * k);
             samples.neighbours[3] = GetSourceTexture(uv + float2(-1, 0) * k);
+        #endif
+
+        #if _USETONEMAPPING
+            ConvertNeighboursToPerceptualSpace(samples);
         #endif
     }
 
@@ -309,6 +366,14 @@ Shader "Hidden/PostProcessing/TAA"
 
         samples.maxNeighbour = Max3Float3(samples.neighbours[0], samples.neighbours[1], samples.neighbours[2]);
         samples.maxNeighbour = Max3Float3(samples.maxNeighbour, samples.central, samples.neighbours[3]);
+
+        #if WIDE_NEIGHBOURHOOD
+            samples.minNeighbour = Min3Float3(samples.minNeighbour, samples.neighbours[4], samples.neighbours[5]);
+            samples.minNeighbour = Min3Float3(samples.minNeighbour, samples.neighbours[6], samples.neighbours[7]);
+
+            samples.maxNeighbour = Max3Float3(samples.maxNeighbour, samples.neighbours[4], samples.neighbours[5]);
+            samples.maxNeighbour = Max3Float3(samples.maxNeighbour, samples.neighbours[6], samples.neighbours[7]);
+        #endif
         
         samples.avgNeighbour = 0;
         //计算平均值
@@ -329,6 +394,7 @@ Shader "Hidden/PostProcessing/TAA"
         #endif
     }
 
+    // From Playdead's TAA
     float3 DirectClipToAABB(float3 history, float3 minimum, float3 maximum)
     {
         // note: only clips towards aabb center (but fast!)
@@ -347,6 +413,23 @@ Shader "Hidden/PostProcessing/TAA"
             return history;
     }
 
+    // Here the ray referenced goes from history to (filtered) center color
+    float DistToAABB(float3 color, float3 history, float3 minimum, float3 maximum)
+    {
+        float3 center = 0.5 * (maximum + minimum);
+        float3 extents = 0.5 * (maximum - minimum);
+
+        float3 rayDir = color - history;
+        float3 rayPos = history - center;
+
+        float3 invDir = rcp(rayDir);
+        float3 t0 = (extents - rayPos) * invDir;
+        float3 t1 = - (extents + rayPos) * invDir;
+
+        float AABBIntersection = max(max(min(t0.x, t1.x), min(t0.y, t1.y)), min(t0.z, t1.z));
+        return saturate(AABBIntersection);
+    }
+
     float3 GetClippedHistory(float3 filteredColor, float3 history, float3 minimum, float3 maximum)
     {
         #if HISTORY_CLIP_AABB
@@ -357,6 +440,44 @@ Shader "Hidden/PostProcessing/TAA"
         #else
             return clamp(history, minimum, maximum);
         #endif
+    }
+
+    // TODO: This is not great and sub optimal since it really needs to be in linear and the data is already in perceptive space
+    // 因为前面已经把值都ToneMapping转换过而且可能变换到了YCoCg空间 这里需要转回来处理 比较浪费 可以考虑预先存储
+    float3 SharpenColor(NeighbourhoodSamples samples, float3 color, float sharpenStrength)
+    {
+        // TODO 这里的低通滤波部分只是一个均值 锐化效果很一般 如果需要可以换个滤波核
+        float3 linearC = color * PerceptualInvWeight(color);
+        float3 linearAvg = samples.avgNeighbour * PerceptualInvWeight(samples.avgNeighbour);
+
+        #if YCOCG
+            // Rotating back to RGB it leads to better behaviour when sharpening, a better approach needs definitively to be investigated in the future.
+            linearC = ConvertToOutputSpace(linearC);
+            linearAvg = ConvertToOutputSpace(linearAvg);
+            linearC = linearC + (linearC - linearAvg) * sharpenStrength * 3;
+            linearC = clamp(linearC, 0, CLAMP_MAX);
+
+            linearC = ConvertToWorkingSpace(linearC);
+        #else
+            linearC = linearC + (linearC - linearAvg) * sharpenStrength * 3;
+            linearC = clamp(linearC, 0, CLAMP_MAX);
+        #endif
+
+        float3 outputSharpened = linearC * PerceptualWeight(linearC);
+        return outputSharpened;
+    }
+
+    float HistoryContrast(float motionVectorLength, float historyLuma, float minNeighbourLuma, float maxNeighbourLuma)
+    {
+        float lumaContrast = max(maxNeighbourLuma - minNeighbourLuma, 0) / historyLuma;
+        float blendFactor = 1 - lerp(_SharpenBlend, 0.2, saturate(motionVectorLength * 20.0)); //0.125;
+        return saturate(blendFactor * rcp(1.0 + lumaContrast));
+    }
+
+    float GetBlendFactor(float motionVectorLength, float colorLuma, float historyLuma, float minNeighbourLuma, float maxNeighbourLuma)
+    {
+        // TODO: Investigate factoring in the speed in this computation.
+        return HistoryContrast(motionVectorLength, historyLuma, minNeighbourLuma, maxNeighbourLuma);
     }
 
 
@@ -389,7 +510,6 @@ Shader "Hidden/PostProcessing/TAA"
         return output;
     }
 
-
     half4 FragTAA(VaryingsTAA input) : SV_Target
     {
         // --------------- Get resampled history ---------------
@@ -397,10 +517,9 @@ Shader "Hidden/PostProcessing/TAA"
 
         float2 prevUV = GetReprojection(depth, input.uv.zw);
         float2 motionVector = input.uv.xy - prevUV;
-
+        
         float3 history = GetFilteredHistory(prevUV);
         history *= PerceptualWeight(history);
-        // return float4(history, 1);
 
         // --------------- Gather neigbourhood data ---------------
         float2 uv = input.uv.xy - _Jitter;
@@ -413,7 +532,7 @@ Shader "Hidden/PostProcessing/TAA"
         // --------------- Filter central sample ---------------
         float3 filteredColor = FilterCentralColor(samples);
 
-        //TODO 处理屏幕边缘
+        //TODO 处理屏幕边缘 边缘还是会溢出
         bool offScreen = any(abs(prevUV * 2 - 1) >= 1.0f);
         if (offScreen)
             history = filteredColor;
@@ -427,6 +546,7 @@ Shader "Hidden/PostProcessing/TAA"
         history = GetClippedHistory(filteredColor, history, samples.minNeighbour, samples.maxNeighbour);
 
         #if SHARPEN_FILTER
+            filteredColor = SharpenColor(samples, filteredColor, _SharpenStrength);
         #endif
 
         // --------------- Compute blend factor for history ---------------
@@ -435,7 +555,7 @@ Shader "Hidden/PostProcessing/TAA"
         // blendFactor = max(blendFactor, 0.03);
         // 还是先用老版本混合系数
         float blendFactor = 1 - clamp(lerp(_StationaryBlend, _MotionBlend, motionVectorLength * 6000), _MotionBlend, _StationaryBlend);
-
+        
         // --------------- Blend to final value and output ---------------
         float3 finalColor = lerp(history, filteredColor, blendFactor);
 
@@ -457,9 +577,15 @@ Shader "Hidden/PostProcessing/TAA"
         Pass
         {
             Name "TemporalAntialiasing"
-            Cull Back
+            ZTest Always ZWrite Off Cull Off
 
             HLSLPROGRAM
+
+            #pragma multi_compile_local_fragment LOW_QUALITY HIGH_QUALITY MEDIUM_QUALITY
+            #pragma multi_compile_local_fragment _ _USEMOTIONVECTOR
+            #pragma multi_compile_local_fragment _ _USETONEMAPPING
+            #pragma multi_compile_local_fragment _ _USEBICUBIC5TAP
+
             #pragma vertex VertTAA
             #pragma fragment FragTAA
             
