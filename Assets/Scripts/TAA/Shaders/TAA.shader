@@ -34,6 +34,7 @@ Shader "Hidden/PostProcessing/TAA"
     #define CLAMP_MAX       65472.0 // HALF_MAX minus one (2 - 2^-9) * 2^15
     float4 _BlitTexture_TexelSize;
     TEXTURE2D(_HistoryTexture); float4 _HistoryTexture_TexelSize;
+    TEXTURE2D_FLOAT(_MotionVectorTexture);
 
     float4 _CameraDepthTexture_TexelSize;
 
@@ -173,7 +174,7 @@ Shader "Hidden/PostProcessing/TAA"
 
 
     // 没有MotionVector 只处理摄像机运动的偏移
-    // 得到当前片元在上一帧画面中的位置
+    // 得到当前片元在上一帧画面中的UV位置
     float2 GetReprojection(float depth, float2 uv)
     {
         //https://zhuanlan.zhihu.com/p/138866533
@@ -361,6 +362,7 @@ Shader "Hidden/PostProcessing/TAA"
     void MinMaxNeighbourhood(inout NeighbourhoodSamples samples)
     {
         // We always have at least the first 4 neighbours.
+        //构造颜色空间的AABB 但是有时会在RGB空间上 斜三角会产生一个很大的矩形区域 更好的方法是YCOCG色彩空间下使用AABB
         samples.minNeighbour = Min3Float3(samples.neighbours[0], samples.neighbours[1], samples.neighbours[2]);
         samples.minNeighbour = Min3Float3(samples.minNeighbour, samples.central, samples.neighbours[3]);
 
@@ -515,9 +517,18 @@ Shader "Hidden/PostProcessing/TAA"
         // --------------- Get resampled history ---------------
         float depth = SampleSceneDepth(input.uv.xy);
 
-        float2 prevUV = GetReprojection(depth, input.uv.zw);
-        float2 motionVector = input.uv.xy - prevUV;
+        #if _USEMOTIONVECTOR
+            float2 closest = GetClosestFragment(depth, input.uv.xy);
+            float2 motionVector = SAMPLE_TEXTURE2D(_MotionVectorTexture, sampler_LinearClamp, closest).xy;
+            motionVector += _Jitter;
+            float2 prevUV = input.uv.xy - motionVector;
+        #else
+            //因为摄像机发生了抖动,如果还以当前uv的话 就会产生残影了
+            float2 prevUV = GetReprojection(depth, input.uv.zw);
+            float2 motionVector = input.uv.xy - prevUV;
+        #endif
         
+        //得到上一混合帧的结果
         float3 history = GetFilteredHistory(prevUV);
         history *= PerceptualWeight(history);
 
@@ -527,6 +538,7 @@ Shader "Hidden/PostProcessing/TAA"
         float3 color = GetSourceTexture(uv).rgb;
 
         NeighbourhoodSamples samples;
+        //获取临近像素信息
         GatherNeighbourhood(uv, color, samples);
 
         // --------------- Filter central sample ---------------
@@ -542,10 +554,13 @@ Shader "Hidden/PostProcessing/TAA"
         float historyLuma = GetLuma(history);
 
         float motionVectorLength = length(motionVector);
+        //决定临近像素AABB
         GetNeighbourhoodCorners(samples, historyLuma, colorLuma, float2(_AntiFlickerIntensity, _ContrastForMaxAntiFlicker), motionVectorLength);
+        //根据临近像素 对历史帧进行取舍
         history = GetClippedHistory(filteredColor, history, samples.minNeighbour, samples.maxNeighbour);
 
         #if SHARPEN_FILTER
+            //因为TAA会带来一定的虚化 在锐化回去
             filteredColor = SharpenColor(samples, filteredColor, _SharpenStrength);
         #endif
 
