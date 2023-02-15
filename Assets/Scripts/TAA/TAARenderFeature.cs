@@ -48,8 +48,6 @@ public class TAARenderFeature : ScriptableRendererFeature
         [Tooltip("锐化混合只在HighQuality生效")]
         [Range(0f, 1f)]
         public float SharpenBlend = 0.2f;
-
-
     }
 
     public Settings settings;
@@ -72,8 +70,8 @@ public class TAARenderFeature : ScriptableRendererFeature
 
         m_TAACameraPass = new TemporalAntialiasingCamera();
         //根据渲染路径决定顺序
-        m_TAACameraPass.renderPassEvent = RenderPassEvent.BeforeRenderingOpaques;//Forward
-        // m_TAACameraPass.renderPassEvent = RenderPassEvent.BeforeRenderingGbuffer;//Deferred
+        // m_TAACameraPass.renderPassEvent = RenderPassEvent.BeforeRenderingOpaques;//Forward
+        m_TAACameraPass.renderPassEvent = RenderPassEvent.BeforeRenderingGbuffer;//Deferred
 
         if (m_Material == null)
         {
@@ -163,8 +161,6 @@ public class TAARenderFeature : ScriptableRendererFeature
         m_Material.SetVector(ShaderConstants.Params2, new Vector4(settings.SharpenBlend, settings.StationaryBlending, settings.MotionBlending, 0));
     }
 
-
-
     public override void AddRenderPasses(ScriptableRenderer renderer, ref RenderingData renderingData)
     {
         CameraData cameraData = renderingData.cameraData;
@@ -200,18 +196,20 @@ public class TAARenderFeature : ScriptableRendererFeature
         m_TAAPass.Setup(settings, m_Material, m_MultiCameraInfo);
         renderer.EnqueuePass(m_TAAPass);
     }
+
+
 }
 
 public class MultiCameraInfo
 {
     const int k_NumHistoryTextures = 2;
-    RenderTexture[] m_HistoryPingPongRT;
+    RTHandle[] m_HistoryPingPongRTHandle;
     public Matrix4x4 m_PreviousViewProjectionMatrix = Matrix4x4.zero;
     int m_PingPong = 0;
 
     public MultiCameraInfo()
     {
-        m_HistoryPingPongRT = new RenderTexture[k_NumHistoryTextures];
+        m_HistoryPingPongRTHandle = new RTHandle[k_NumHistoryTextures];
     }
 
     public Matrix4x4 SetPreviousVPMatrix(Matrix4x4 curVPMatrix)
@@ -221,32 +219,32 @@ public class MultiCameraInfo
         return preVPMatrix;
     }
 
-    public RenderTexture GetHistoryRT(int id)
+    public RTHandle GetHistoryRTHandle(int id)
     {
-        return m_HistoryPingPongRT[id];
+        return m_HistoryPingPongRTHandle[id];
     }
 
-    public void SetHistoryRT(int id, RenderTexture rt)
+    public void SetHistoryRTHandle(int id, RTHandle rt)
     {
-        m_HistoryPingPongRT[id] = rt;
+        m_HistoryPingPongRTHandle[id] = rt;
     }
 
-    public void GetHistoryPingPongRT(ref RenderTexture rt1, ref RenderTexture rt2)
+    public void GetHistoryPingPongRT(ref RTHandle rt1, ref RTHandle rt2)
     {
         int index = m_PingPong;
         m_PingPong = ++m_PingPong % 2;
 
-        rt1 = GetHistoryRT(index);
-        rt2 = GetHistoryRT(m_PingPong);
+        rt1 = GetHistoryRTHandle(index);
+        rt2 = GetHistoryRTHandle(m_PingPong);
     }
 
     public void Clear()
     {
-        for (int i = 0; i < m_HistoryPingPongRT.Length; i++)
+        for (int i = 0; i < m_HistoryPingPongRTHandle.Length; i++)
         {
-            if (m_HistoryPingPongRT[i] != null)
-                RenderTexture.ReleaseTemporary(m_HistoryPingPongRT[i]);
-            m_HistoryPingPongRT[i] = null;
+            if (m_HistoryPingPongRTHandle[i] != null)
+                m_HistoryPingPongRTHandle[i].Release();
+            m_HistoryPingPongRTHandle[i] = null;
         }
     }
 }

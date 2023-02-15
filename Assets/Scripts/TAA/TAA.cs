@@ -24,20 +24,13 @@ public class TAAPass : ScriptableRenderPass
             m_MultiCameraInfo[hash] = new MultiCameraInfo();
         }
 
-        var rt = m_MultiCameraInfo[hash].GetHistoryRT(id);
+        var rtHandle = m_MultiCameraInfo[hash].GetHistoryRTHandle(id);
 
-        if (rt == null || rt.width != desc.width || rt.height != desc.height)
+        if (RenderingUtils.ReAllocateIfNeeded(ref rtHandle, desc, name: "_TemporalHistoryRT_" + id))
         {
-            var newRT = RenderTexture.GetTemporary(desc);
-            newRT.name = "_TemporalHistoryRT_" + id;
-
             // 分辨率改变时还是从上一个历史RT拷贝
-            cmd.Blit(rt == null ? source : rt, newRT);
-
-            if (rt != null)
-                RenderTexture.ReleaseTemporary(rt);
-
-            m_MultiCameraInfo[hash].SetHistoryRT(id, newRT);
+            cmd.Blit(source, rtHandle);
+            m_MultiCameraInfo[hash].SetHistoryRTHandle(id, rtHandle);
         }
     }
 
@@ -58,9 +51,8 @@ public class TAAPass : ScriptableRenderPass
         using (new ProfilingScope(cmd, m_ProfilingSampler))
         {
             var desc = renderingData.cameraData.cameraTargetDescriptor;
-
-            // RenderingUtils.ReAllocateIfNeeded(ref m_Target, renderingData.cameraData.cameraTargetDescriptor, FilterMode.Point, wrapMode: TextureWrapMode.Clamp, name: "_TAATexture");
-
+            desc.msaaSamples = 1;
+            desc.depthBufferBits = 0;
             Camera camera = renderingData.cameraData.camera;
 
             //准备历史RT
@@ -69,15 +61,20 @@ public class TAAPass : ScriptableRenderPass
             CheckHistoryRT(0, hash, cmd, source, desc);
             CheckHistoryRT(1, hash, cmd, source, desc);
 
-            RenderTexture rt1 = null, rt2 = null;
+            RTHandle rt1 = null, rt2 = null;
             m_MultiCameraInfo[hash].GetHistoryPingPongRT(ref rt1, ref rt2);
-            cmd.SetGlobalTexture("_HistoryTexture", rt1);
+            m_Material.SetTexture("_HistoryTexture", rt1);
 
-            // Blit(cmd, renderingData.cameraData.renderer.cameraColorTargetHandle, m_Target, m_Material);
+            // Blit(cmd, source, source, m_Material);
             Blit(cmd, ref renderingData, m_Material);
         }
 
         context.ExecuteCommandBuffer(cmd);
         CommandBufferPool.Release(cmd);
+    }
+
+    public override void OnCameraCleanup(CommandBuffer cmd)
+    {
+        base.OnCameraCleanup(cmd);
     }
 }
