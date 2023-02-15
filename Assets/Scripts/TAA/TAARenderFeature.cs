@@ -126,6 +126,12 @@ public class TAARenderFeature : ScriptableRendererFeature
     public override void AddRenderPasses(ScriptableRenderer renderer, ref RenderingData renderingData)
     {
         CameraData cameraData = renderingData.cameraData;
+        if (cameraData.isPreviewCamera) return;
+        if (cameraData.isSceneViewCamera && !settings.PreviewInSceneView)
+        {
+            return;
+        }
+
         Camera camera = cameraData.camera;
         int hash = camera.GetHashCode();
 
@@ -149,6 +155,18 @@ public class TAARenderFeature : ScriptableRendererFeature
         renderer.EnqueuePass(m_TAAPass);
     }
 
+    protected override void Dispose(bool disposing)
+    {
+        foreach (var info in m_MultiCameraInfo)
+        {
+            if (info.Value != null)
+                info.Value.Clear();
+        }
+        m_MultiCameraInfo.Clear();
+
+        sampleIndex = 0;
+
+    }
 
 }
 
