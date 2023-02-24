@@ -111,10 +111,10 @@ MonoBehaviour:
     PreviewInSceneView: 1
     UseMotionVector: 0
     UseToneMapping: 0
-    StationaryBlending: 0.95
-    MotionBlending: 0.7
-    AntiFlicker: 0.5
-    SharpenStrength: 0.15
+    StationaryBlending: 0.46
+    MotionBlending: 0.49
+    AntiFlicker: 0.642
+    SharpenStrength: 0.5
     sharpenHistoryStrength: 0.35
     SharpenBlend: 0.2
     UseBicubic: 0

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Rendering.Universal;
 using UnityEngine.Rendering;
+using UnityEngine.Experimental.Rendering;
 
 public class TAAPass : ScriptableRenderPass
 {
@@ -11,9 +12,10 @@ public class TAAPass : ScriptableRenderPass
     private TAARenderFeature.Settings m_Settings;
 
     Dictionary<int, MultiCameraInfo> m_MultiCameraInfo;// = new Dictionary<int, MultiCameraInfo>();
-    string[] m_ShaderKeywords = new string[4];
+    string[] m_ShaderKeywords = new string[5];
     Matrix4x4 m_PreviousViewProjectionMatrix;
     Vector2 m_Jitter;
+    bool useAlpha = false;
 
     public TAAPass()
     {
@@ -71,16 +73,28 @@ public class TAAPass : ScriptableRenderPass
         m_ShaderKeywords[1] = (!cameraData.isSceneViewCamera && m_Settings.UseMotionVector) ? "_USEMOTIONVECTOR" : "_";
         m_ShaderKeywords[2] = m_Settings.UseToneMapping ? "_USETONEMAPPING" : "_";
         m_ShaderKeywords[3] = m_Settings.UseBicubic ? "_USEBICUBIC5TAP" : "_";
+        m_ShaderKeywords[4] = useAlpha ? "ENABLE_ALPHA" : "_";
         m_Material.shaderKeywords = m_ShaderKeywords;
     }
 
 
 
-    void CheckHistoryRT(int id, int hash, CommandBuffer cmd, RTHandle source, RenderTextureDescriptor desc)
+    void CheckHistoryRT(int id, int hash, CommandBuffer cmd, RTHandle source, RenderTextureDescriptor desc, bool isSceneView)
     {
         if (!m_MultiCameraInfo.ContainsKey(hash))
         {
             m_MultiCameraInfo[hash] = new MultiCameraInfo();
+        }
+
+        // 为了记录A通道 需要修改格式  移动平台未知
+        if (!isSceneView && SystemInfo.IsFormatSupported(GraphicsFormat.R16G16B16A16_SFloat, FormatUsage.Sample))
+        {
+            useAlpha = true;
+            desc.graphicsFormat = GraphicsFormat.R16G16B16A16_SFloat;
+        }
+        else
+        {
+            useAlpha = false;
         }
 
         var rtHandle = m_MultiCameraInfo[hash].GetHistoryRTHandle(id);
@@ -121,8 +135,8 @@ public class TAAPass : ScriptableRenderPass
             //准备历史RT
             int hash = camera.GetHashCode();
             var source = renderingData.cameraData.renderer.cameraColorTargetHandle;
-            CheckHistoryRT(0, hash, cmd, source, desc);
-            CheckHistoryRT(1, hash, cmd, source, desc);
+            CheckHistoryRT(0, hash, cmd, source, desc, renderingData.cameraData.isSceneViewCamera);
+            CheckHistoryRT(1, hash, cmd, source, desc, renderingData.cameraData.isSceneViewCamera);
 
             RTHandle rt1 = null, rt2 = null;
             m_MultiCameraInfo[hash].GetHistoryPingPongRT(ref rt1, ref rt2);
